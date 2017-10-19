@@ -2,9 +2,21 @@
 extern crate cc;
 
 use cc::Build;
-use std::{env, fs, str};
-use std::path::PathBuf;
+use std::{fs, str};
+use std::env::{self, VarError};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn get_env(name: &str) -> Option<String> {
+    println!("cargo:rerun-if-env-changed={}", name);
+    match env::var(name) {
+        Ok(s) => Some(s),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(s)) => {
+            panic!("unrecognize env var of {}: {:?}", name, s.to_string_lossy());
+        }
+    }
+}
 
 macro_rules! t {
     ($e:expr) => (match $e {
@@ -25,10 +37,28 @@ fn main() {
     println!("cargo:rustc-link-lib=static=crocksdb");
 }
 
+const COMPRESS_LIBS: &'static [(&'static str, &'static str)] = &[
+    ("SNAPPY", "snappy"),
+    ("ZLIB", "z"),
+    ("BZIP2", "bz2"),
+    ("LZ4", "lz4"),
+    ("ZSTD", "zstd"),
+];
+
+fn is_lib_disabled(name: &str) -> bool {
+    get_env(&format!("ROCKSDB_DISABLE_{}", name)).is_some()
+}
+
 fn build_rocksdb() -> Build {
     let mut cfg = Build::new();
 
-    if !cfg!(feature = "static-link") {
+    for &(name, _) in COMPRESS_LIBS {
+        if !is_lib_disabled(name) {
+            cfg.define(name, None);
+        }
+    }
+
+    if get_env("ROCKSDB_STATIC").is_none() {
         if cfg!(target_os = "windows") {
             println!("cargo:rustc-link-lib=rocksdb-shared");
         } else {
@@ -38,11 +68,11 @@ fn build_rocksdb() -> Build {
     }
 
     println!("cargo:rustc-link-lib=static=rocksdb");
-    println!("cargo:rustc-link-lib=static=z");
-    println!("cargo:rustc-link-lib=static=bz2");
-    println!("cargo:rustc-link-lib=static=lz4");
-    println!("cargo:rustc-link-lib=static=zstd");
-    println!("cargo:rustc-link-lib=static=snappy");
+    for &(name, lib) in COMPRESS_LIBS {
+        if !is_lib_disabled(name) {
+            println!("cargo:rust-link-lib=static={}", lib);
+        }
+    }
 
     if !cfg!(target_os = "linux") && !cfg!(target_os = "macos") {
         // Compilation is not tested in other platform, so hopefully
@@ -56,45 +86,12 @@ fn build_rocksdb() -> Build {
 
     let fest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let p = PathBuf::from(fest_dir.clone()).join("build.sh");
-    for lib in &["z", "snappy", "bz2", "lz4", "zstd", "rocksdb"] {
-        let lib_name = format!("lib{}.a", lib);
-        let src = build.join(&lib_name);
-        let dst = dst.join(&lib_name);
-
-        if dst.exists() && *lib != "rocksdb" {
+    for &(name, lib) in COMPRESS_LIBS {
+        if is_lib_disabled(name) {
             continue;
         }
 
-        if *lib == "rocksdb" && src.exists() {
-            fs::remove_dir_all(&src).unwrap();
-            if dst.exists() {
-                fs::remove_file(&dst).unwrap();
-            }
-        }
-
-        if !src.exists() {
-            let mut cmd = Command::new(p.as_path());
-            cmd.current_dir(&build).args(&[format!("compile_{}", lib)]);
-            if *lib == "rocksdb" {
-                if cfg!(feature = "portable") {
-                    cmd.env("PORTABLE", "1");
-                }
-
-                if cfg!(feature = "sse") {
-                    cmd.env("USE_SSE", "1");
-                }
-            }
-            run(&mut cmd);
-        }
-
-        if let Err(e) = fs::rename(src.as_path(), dst.as_path()) {
-            panic!(
-                "failed to move {} to {}: {:?}",
-                src.display(),
-                dst.display(),
-                e
-            );
-        }
+        build_lib(p.as_path(), &lib, build.as_path(), dst.as_path());
     }
 
     println!("cargo:rustc-link-search=native={}", dst.display());
@@ -149,6 +146,48 @@ fn build_rocksdb() -> Build {
         output
     );
     cfg
+
+}
+
+fn build_lib(build_tool: &Path, lib: &str, build: &Path, dst: &Path) {
+    let lib_name = format!("lib{}.a", lib);
+    let src = build.join(&lib_name);
+    let dst = dst.join(&lib_name);
+
+    if dst.exists() && lib != "rocksdb" {
+        return;
+    }
+
+    if lib == "rocksdb" && src.exists() {
+        fs::remove_dir_all(&src).unwrap();
+        if dst.exists() {
+            fs::remove_file(&dst).unwrap();
+        }
+    }
+
+    if !src.exists() {
+        let mut cmd = Command::new(build_tool);
+        cmd.current_dir(&build).args(&[format!("compile_{}", lib)]);
+        if lib == "rocksdb" {
+            if let Some(v) = get_env("ROCKSDB_PORTABLE") {
+                cmd.env("PORTABLE", v);
+            }
+
+            if let Some(v) = get_env("ROCKSDB_USE_SSE") {
+                cmd.env("USE_SSE", v);
+            }
+        }
+        run(&mut cmd);
+    }
+
+    if let Err(e) = fs::rename(src.as_path(), dst.as_path()) {
+        panic!(
+            "failed to move {} to {}: {:?}",
+            src.display(),
+            dst.display(),
+            e
+        );
+    }
 }
 
 fn run(cmd: &mut Command) {
