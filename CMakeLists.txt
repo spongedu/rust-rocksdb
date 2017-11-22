@@ -32,7 +32,7 @@
 # 3. cmake ..
 # 4. make -j
 
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 2.8.12)
 project(rocksdb)
 
 if(POLICY CMP0042)
@@ -56,6 +56,7 @@ else()
       include_directories(${JEMALLOC_INCLUDE_DIR})
     endif()
   endif()
+
   option(WITH_SNAPPY "build with SNAPPY" OFF)
   if(WITH_SNAPPY)
     find_package(snappy REQUIRED)
@@ -63,19 +64,41 @@ else()
     include_directories(${SNAPPY_INCLUDE_DIR})
     list(APPEND THIRDPARTY_LIBS ${SNAPPY_LIBRARIES})
   endif()
+
+  option(WITH_ZLIB "build with zlib" OFF)
+  if(WITH_ZLIB)
+    find_package(zlib REQUIRED)
+    add_definitions(-DZLIB)
+    include_directories(${ZLIB_INCLUDE_DIR})
+    list(APPEND THIRDPARTY_LIBS ${ZLIB_LIBRARIES})
+  endif()
+
+  option(WITH_BZ2 "build with bzip2" OFF)
+  if(WITH_BZ2)
+    find_package(bzip2 REQUIRED)
+    add_definitions(-DBZIP2)
+    include_directories(${BZIP2_INCLUDE_DIR})
+    list(APPEND THIRDPARTY_LIBS ${BZIP2_LIBRARIES})
+  endif()
+
+  option(WITH_LZ4 "build with lz4" OFF)
+  if(WITH_LZ4)
+    find_package(lz4 REQUIRED)
+    add_definitions(-DLZ4)
+    include_directories(${LZ4_INCLUDE_DIR})
+    list(APPEND THIRDPARTY_LIBS ${LZ4_LIBRARIES})
+  endif()
+
+  option(WITH_ZSTD "build with zstd" OFF)
+  if(WITH_ZSTD)
+    find_package(zstd REQUIRED)
+    add_definitions(-DZSTD)
+    include_directories(${ZSTD_INCLUDE_DIR})
+    list(APPEND THIRDPARTY_LIBS ${ZSTD_LIBRARIES})
+  endif()
 endif()
 
-if(WIN32)
-  execute_process(COMMAND powershell -noprofile -Command "Get-Date -format MM_dd_yyyy" OUTPUT_VARIABLE DATE)
-  execute_process(COMMAND powershell -noprofile -Command "Get-Date -format HH:mm:ss" OUTPUT_VARIABLE TIME)
-  string(REGEX REPLACE "(..)_(..)_..(..).*" "\\1/\\2/\\3" DATE "${DATE}")
-  string(REGEX REPLACE "(..):(.....).*" " \\1:\\2" TIME "${TIME}")
-  set(GIT_DATE_TIME "${DATE} ${TIME}")
-else()
-  execute_process(COMMAND date "+%Y/%m/%d %H:%M:%S" OUTPUT_VARIABLE DATETIME)
-  string(REGEX REPLACE "\n" "" DATETIME ${DATETIME})
-  set(GIT_DATE_TIME "${DATETIME}")
-endif()
+string(TIMESTAMP GIT_DATE_TIME "%Y/%m/%d %H:%M:%S" UTC)
 
 find_package(Git)
 
@@ -131,8 +154,10 @@ else()
   endif()
 endif()
 
-set(CMAKE_REQUIRED_FLAGS ${CMAKE_CXX_FLAGS})
 include(CheckCXXSourceCompiles)
+if(NOT MSVC)
+  set(CMAKE_REQUIRED_FLAGS "-msse4.2")
+endif()
 CHECK_CXX_SOURCE_COMPILES("
 #include <cstdint>
 #include <nmmintrin.h>
@@ -140,6 +165,7 @@ int main() {
   volatile uint32_t x = _mm_crc32_u32(0, 0);
 }
 " HAVE_SSE42)
+unset(CMAKE_REQUIRED_FLAGS)
 if(HAVE_SSE42)
   add_definitions(-DHAVE_SSE42)
 elseif(FORCE_SSE42)
@@ -530,6 +556,12 @@ set(SOURCES
         utilities/write_batch_with_index/write_batch_with_index.cc
         utilities/write_batch_with_index/write_batch_with_index_internal.cc
         $<TARGET_OBJECTS:build_version>)
+
+if(HAVE_SSE42 AND NOT FORCE_SSE42)
+set_source_files_properties(
+  util/crc32c.cc
+  PROPERTIES COMPILE_FLAGS "-msse4.2")
+endif()
 
 if(WIN32)
   list(APPEND SOURCES
